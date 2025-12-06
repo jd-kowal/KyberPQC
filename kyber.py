@@ -208,11 +208,11 @@ def sanity_check_ntt():
     transformed = ntt(test_poly)
     recovered = inv_ntt(transformed)
     if recovered != test_poly:
-        print("❌ CRITICAL ERROR: NTT -> InvNTT does not return original!")
+        print("CRITICAL ERROR: NTT -> InvNTT does not return original!")
         print(f"Original[:5]: {test_poly[:5]}")
         print(f"Recovered[:5]: {recovered[:5]}")
         return False
-    print("✅ NTT Invertibility: OK")
+    print("NTT Invertibility: OK")
     return True
 
 def keygen():
@@ -255,6 +255,6 @@ if __name__ == "__main__":
     print(f"Recovered message: {rec}")
     
     if rec == secret:
-        print("SUCCESS! 🎉")
+        print("SUCCESS!")
     else:
-        print("FAIL ❌")
+        print("FAIL")
