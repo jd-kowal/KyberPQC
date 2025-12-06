@@ -1,179 +1,198 @@
 import random
+from typing import List
 
-# --- KONFIGURACJA (Uproszczona, edukacyjna) ---
-# N=8 oznacza, że mamy 8 "slotów" w wielomianie, więc możemy przesłać 8 bitów.
-N = 8       
-Q = 3329      
-K = 2       
+# ============================
+# PARAMETRY
+# ============================
+N = 256       # stopień pierścienia (wielomiany mają N współczynników)
+Q = 3329      # modulo (jak w Kyberze)
+K = 2         # wymiar macierzy (upraszczony Kyber: K=2)
+ETA = 2       # parametr CBD (eta=2 typowy dla Kyber-512)
 
-print(f"--- Kyber EDU: N={N}, Q={Q} (Przesyłanie liczb 0-255) ---")
+# ============================
+# REPREZENTACJE
+# ============================
+Poly = List[int]  # reprezentacja wewnętrzna jako lista intów długości N
 
-# --- KLASA WIELOMIANU ---
-class Poly:
-    """Reprezentuje element pierścienia R_q = Z_q[X] / (X^N + 1)"""
-    def __init__(self, coeffs=None):
+# ============================
+# KLASA WIELOMIANU (prosta)
+# ============================
+class PolyObj:
+    """Element pierścienia R_q = Z_q[X] / (X^N + 1). Reprezentowany jako lista N współczynników."""
+    def __init__(self, coeffs: List[int] = None):
         if coeffs is None:
             self.coeffs = [0] * N
         else:
-            self.coeffs = (coeffs + [0]*N)[:N]
-            self.coeffs = [c % Q for c in self.coeffs]
+            # wymuszamy długość N i redukcję modulo Q
+            c = (coeffs + [0] * N)[:N]
+            self.coeffs = [int(x) % Q for x in c]
 
-    def __add__(self, other):
-        new_coeffs = [(a + b) % Q for a, b in zip(self.coeffs, other.coeffs)]
-        return Poly(new_coeffs)
+    def __add__(self, other: 'PolyObj') -> 'PolyObj':
+        return PolyObj([(a + b) % Q for a, b in zip(self.coeffs, other.coeffs)])
 
-    def __sub__(self, other):
-        new_coeffs = [(a - b) % Q for a, b in zip(self.coeffs, other.coeffs)]
-        return Poly(new_coeffs)
+    def __sub__(self, other: 'PolyObj') -> 'PolyObj':
+        return PolyObj([(a - b) % Q for a, b in zip(self.coeffs, other.coeffs)])
 
-    def __mul__(self, other):
-        """Mnożenie z redukcją modulo X^N + 1"""
+    def __mul__(self, other: 'PolyObj') -> 'PolyObj':
+        # konwolucja, potem redukcja modulo X^N + 1 (x^N ≡ -1)
         res = [0] * (2 * N)
+        a = self.coeffs
+        b = other.coeffs
         for i in range(N):
+            ai = a[i]
+            if ai == 0:
+                continue
             for j in range(N):
-                res[i + j] = (res[i + j] + self.coeffs[i] * other.coeffs[j]) 
-        
-        final_coeffs = [0] * N
-        for i in range(N):
-            final_coeffs[i] = (res[i] - res[i + N]) % Q
-            
-        return Poly(final_coeffs)
+                res[i + j] += ai * b[j]
+        # redukcja x^{i+N} -> -x^i
+        final = [(res[i] - res[i + N]) % Q for i in range(N)]
+        return PolyObj(final)
+
+    def copy(self) -> 'PolyObj':
+        return PolyObj(self.coeffs[:])
 
     def __repr__(self):
-        return str(self.coeffs)
+        return f"PolyObj(len={N})"
 
-# --- FUNKCJE POMOCNICZE ---
+    def to_list(self) -> List[int]:
+        return self.coeffs[:]  # kopiuj
 
-def generate_random_poly():
-    return Poly([random.randint(0, Q-1) for _ in range(N)])
-
-def generate_small_poly():
-    """Szum: losuje wartości -1, 0, 1 modulo Q"""
+# ============================
+# NARZĘDZIA / GENERATORY SZUMU
+# ============================
+def cbd(eta: int) -> PolyObj:
+    """Centered binomial distribution CBD(eta) producing one polynomial of length N.
+    Każdy współczynnik to różnica sumy eta bitów i kolejnej sumy eta bitów:
+    value = sum_{i=1..eta} b_i - sum_{i=1..eta} b'_i  in [-eta..eta]
+    """
     coeffs = []
     for _ in range(N):
-        val = random.choice([-1, 0, 1])
-        coeffs.append(val % Q)
-    return Poly(coeffs)
+        s1 = sum(random.getrandbits(1) for _ in range(eta))
+        s2 = sum(random.getrandbits(1) for _ in range(eta))
+        coeffs.append(s1 - s2)  # może być ujemne; PolyObj zredukuje do modulo Q
+    return PolyObj(coeffs)
 
-def vec_add(v1, v2):
-    return [x + y for x, y in zip(v1, v2)]
+def generate_random_poly() -> PolyObj:
+    """Losowy wielomian w R_q (używany jako element macierzy A)."""
+    return PolyObj([random.randint(0, Q - 1) for _ in range(N)])
 
-def mat_vec_mul(M, v):
+# ============================
+# OPERACJE WECZKOWE / MACIERZOWE
+# ============================
+def vec_add(v1: List[PolyObj], v2: List[PolyObj]) -> List[PolyObj]:
+    """Dodawanie wektorów wielomianów (element-wise)."""
+    return [a + b for a, b in zip(v1, v2)]
+
+def mat_vec_mul(M: List[List[PolyObj]], v: List[PolyObj]) -> List[PolyObj]:
+    """Mnożenie macierzy M (KxK) przez wektor v (K) -> zwraca wektor K elementów PolyObj."""
     result = []
     for row in M:
-        poly_sum = Poly()
+        s = PolyObj()
         for i in range(len(row)):
-            poly_sum = poly_sum + (row[i] * v[i])
-        result.append(poly_sum)
+            s = s + (row[i] * v[i])
+        result.append(s)
     return result
 
-def vec_dot(v1, v2):
-    poly_sum = Poly()
-    for x, y in zip(v1, v2):
-        poly_sum = poly_sum + (x * y)
-    return poly_sum
+def vec_dot(v1: List[PolyObj], v2: List[PolyObj]) -> PolyObj:
+    """Iloczyn skalarny: sum_i v1_i * v2_i (wynik to PolyObj)."""
+    s = PolyObj()
+    for a, b in zip(v1, v2):
+        s = s + (a * b)
+    return s
 
-# --- 1. GENEROWANIE KLUCZY (Alice) ---
+# ============================
+# ENCODING / DECODING WIADOMOSCI
+# ============================
+def encode_message(m_int: int, bits_to_use: int = 16) -> PolyObj:
+    """Mapujemy liczbę m_int (0..2^bits_to_use-1) na wielomian:
+       - kodujemy bits_to_use bitów (LSB -> coeff[0])
+       - każdy bit=1 -> współczynnik = Q//2, bit=0 -> 0
+       - pozostałe współczynniki = 0
+    """
+    if not (0 <= m_int < (1 << bits_to_use)):
+        raise ValueError(f"message out of range for {bits_to_use} bits")
+    bits = [(m_int >> i) & 1 for i in range(bits_to_use)]
+    coeffs = [(Q // 2) if b == 1 else 0 for b in bits] + [0] * (N - bits_to_use)
+    return PolyObj(coeffs)
+
+def decode_message(p: PolyObj, bits_to_use: int = 16) -> int:
+    """Dekoduje pierwsze bits_to_use współczynników, porównując odległość do 0 i do Q/2."""
+    out = 0
+    half = Q // 2
+    for i in range(bits_to_use):
+        c = p.coeffs[i]
+        # porównujemy odległości w przestrzeni modulo Q:
+        # odległość do 0
+        d0 = min(abs(c - 0), abs(c - Q), abs(c + Q))
+        # odległość do Q/2
+        dh = min(abs(c - half), abs(c - (half - Q)), abs(c - (half + Q)))
+        bit = 1 if dh < d0 else 0
+        out |= (bit << i)
+    return out
+
+# ============================
+# GENEROWANIE KLUCZA
+# ============================
 def keygen():
-    print("\n[1] Generowanie kluczy...")
+    """Zwraca: (pk, sk) gdzie pk = (A, t), sk = s"""
+    print("[keygen] Generating keypair...")
+    # Publiczna macierz A (K x K) - losowa
     A = [[generate_random_poly() for _ in range(K)] for _ in range(K)]
-    s = [generate_small_poly() for _ in range(K)]
-    e = [generate_small_poly() for _ in range(K)]
-    
+    # Sekret i szum małe z CBD
+    s = [cbd(ETA) for _ in range(K)]
+    e = [cbd(ETA) for _ in range(K)]
     # t = A * s + e
     t = vec_add(mat_vec_mul(A, s), e)
-    
-    return (A, t), s
+    pk = (A, t)
+    sk = s
+    return pk, sk
 
-# --- 2. SZYFROWANIE LICZBY 0-255 (Bob) ---
-def encrypt(pk, message_int):
-    # Walidacja zakresu dla N=8
-    if not (0 <= message_int <= 255):
-        raise ValueError(f"Wiadomość musi być z zakresu 0-255 (dla N={N})")
-
-    print(f"\n[2] Szyfrowanie liczby: {message_int}")
+# ============================
+# SZYFROWANIE / DESZYFROWANIE
+# ============================
+def encrypt(pk, message_int: int, bits_to_use: int = 16):
+    """Zwraca (u, v) jako szyfrogram dla wiadomości message_int."""
+    if not (0 <= message_int < (1 << bits_to_use)):
+        raise ValueError("message out of allowed range")
     A, t = pk
-    
-    r = [generate_small_poly() for _ in range(K)]
-    e1 = [generate_small_poly() for _ in range(K)]
-    e2 = generate_small_poly()
-    
+    # losowy r i szumy (CBD)
+    r = [cbd(ETA) for _ in range(K)]
+    e1 = [cbd(ETA) for _ in range(K)]
+    e2 = cbd(ETA)
     # u = A^T * r + e1
     A_T = [[A[j][i] for j in range(K)] for i in range(K)]
     u = vec_add(mat_vec_mul(A_T, r), e1)
-    
-    # Kodowanie wiadomości na wielomian
-    # 1. Zamiana int na bity (np. 5 -> '00000101')
-    # 2. Odwracamy kolejność ([::-1]), aby najmłodszy bit trafił do x^0
-    bits = [int(b) for b in format(message_int, f'0{N}b')[::-1]]
-    
-    scale = Q // 2  # Wartość skalująca (ok. 8)
-    
-    # Jeśli bit=1 -> współczynnik = 8, jeśli bit=0 -> współczynnik = 0
-    msg_coeffs = [scale if b == 1 else 0 for b in bits]
-    m_poly = Poly(msg_coeffs)
-    
-    print(f"   Bity: {bits} -> Wielomian msg: {m_poly.coeffs}")
-
-    # v = t^T * r + e2 + m_poly
+    # m jako wielomian
+    m_poly = encode_message(message_int, bits_to_use=bits_to_use)
+    # v = t^T * r + e2 + m
     v_temp = vec_dot(t, r)
     v = v_temp + e2 + m_poly
-    
     return (u, v)
 
-# --- 3. ODSZYFROWYWANIE (Alice) ---
-def decrypt(sk, ciphertext):
-    print("\n[3] Odszyfrowywanie...")
+def decrypt(sk, ciphertext, bits_to_use: int = 16):
+    """Odwraca szyfrogram i zwraca zdekodowaną liczbę."""
     u, v = ciphertext
     s = sk
-    
-    # Noisy Message = v - s^T * u
     su = vec_dot(s, u)
-    mn = v - su 
-    
-    print(f"   Odzyskany wielomian (z szumem): {mn.coeffs}")
-    
-    # Dekodowanie każdego współczynnika z osobna
-    recovered_bits = []
-    lower_bound = Q // 4       # ok. 4
-    upper_bound = 3 * Q // 4   # ok. 12
-    
-    for coeff in mn.coeffs:
-        # Sprawdzamy czy wartość jest bliżej Q/2 (czyli 1) czy 0
-        # Dla Q=17, "jedynka" to wartości w środku zakresu (np. 5-12)
-        if lower_bound < coeff < upper_bound:
-            recovered_bits.append(1)
-        else:
-            recovered_bits.append(0)
-            
-    print(f"   Zdekodowane bity: {recovered_bits}")
+    m_noisy = v - su
+    # dekoduj tylko pierwsze bits_to_use współczynników
+    return decode_message(m_noisy, bits_to_use=bits_to_use)
 
-    # Zamiana bitów z powrotem na int
-    decrypted_int = 0
-    for i, bit in enumerate(recovered_bits):
-        decrypted_int += bit * (2**i)
-        
-    return decrypted_int
-
-# --- GŁÓWNY PROGRAM ---
+# ============================
+# DEMO / TEST
+# ============================
 if __name__ == "__main__":
-    # 1. Generowanie
+    random.seed(0)  # for reproducibility in demo (usun lub zmień seed w produkcji)
     pk, sk = keygen()
-    
-    # 2. Testujemy liczbę z górnego zakresu bajtu
-    # Możesz zmienić tę wartość na dowolną od 0 do 255
-    tajna_liczba = 159 
-    
-    ciphertext = encrypt(pk, tajna_liczba)
-    
-    # 3. Wynik
-    odzyskana_liczba = decrypt(sk, ciphertext)
-    
-    print(f"\n--- WYNIK ---")
-    print(f"Wysłano: {tajna_liczba}")
-    print(f"Odebrano: {odzyskana_liczba}")
-    
-    if tajna_liczba == odzyskana_liczba:
-        print("Status: SUKCES (Wiadomość poprawna)")
-    else:
-        print("Status: BŁĄD (Szum był zbyt duży dla tak małego Q)")
+    # testujemy 16-bitową wiadomość (0..65535)
+    secret = 12345
+    print(f"\nOriginal message: {secret}")
+    ciphertext = encrypt(pk, secret, bits_to_use=16)
+    recovered = decrypt(sk, ciphertext, bits_to_use=16)
+    print(f"Recovered message: {recovered}")
+    print("OK" if recovered == secret else "FAIL")
+    # dodatkowo pokażmy, z jakim marginesem (przykładowe wartości współczynników)
+    u, v = ciphertext
+    mn = v - vec_dot(sk, u)
+    print("\nSample noisy recovered coeffs (first 16):")
+    print(mn.coeffs[:16])
