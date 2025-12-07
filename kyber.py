@@ -9,6 +9,10 @@ Q = 3329
 K = 2        # Kyber-512
 ETA = 2      # Noise parameter for Kyber-512
 
+# Compression parameters for Kyber-512 (according to FIPS 203)
+DU = 10      # Compression bits for vector u
+DV = 4       # Compression bits for polynomial v
+
 # 128^-1 mod 3329 (Used for scaling after Inverse NTT)
 # 128 * 3303 = 422784 = 1 mod 3329
 N_INV = 3303
@@ -200,6 +204,35 @@ def decode_message(p: PolyObj) -> int:
     return out
 
 # ============================
+# 5.1 COMPRESSION HELPERS
+# ============================
+def compress_int(x: int, d: int) -> int:
+    """
+    Compresses integer x modulo Q to d bits.
+    Formula: round((2^d / Q) * x) % 2^d
+    """
+    x = x % Q
+    # Integer arithmetic equivalent of round(x * (2^d / Q))
+    # We use (x * 2^d + Q//2) // Q
+    return ((x << d) + Q // 2) // Q & ((1 << d) - 1)
+
+def decompress_int(y: int, d: int) -> int:
+    """
+    Decompresses integer y (d bits) back to modulo Q.
+    Formula: round((Q / 2^d) * y)
+    """
+    # Integer arithmetic equivalent of round(y * (Q / 2^d))
+    return (y * Q + (1 << (d - 1))) >> d
+
+def compress_poly(p: PolyObj, d: int) -> PolyObj:
+    """Applies compression to all coefficients of a polynomial."""
+    return PolyObj([compress_int(c, d) for c in p.coeffs])
+
+def decompress_poly(p: PolyObj, d: int) -> PolyObj:
+    """Applies decompression to all coefficients of a polynomial."""
+    return PolyObj([decompress_int(c, d) for c in p.coeffs])
+
+# ============================
 # 6. MAIN & SANITY CHECK
 # ============================
 def sanity_check_ntt():
@@ -227,16 +260,36 @@ def encrypt(pk, m_int):
     r = [cbd(ETA) for _ in range(K)]
     e1 = [cbd(ETA) for _ in range(K)]
     e2 = cbd(ETA)
+
     A_T = [[A[j][i] for j in range(K)] for i in range(K)]
-    u = vec_add(mat_vec_mul(A_T, r), e1)
+
+    # 1. Calculate uncompressed u and v
+    u_poly_vec = vec_add(mat_vec_mul(A_T, r), e1)
+
     m_poly = encode_message(m_int)
-    v = vec_dot(t, r) + e2 + m_poly
-    return u, v
+    v_poly = vec_dot(t, r) + e2 + m_poly
+
+    # 2. COMPRESS ciphertext components
+    # Vector u is compressed to DU bits (10 bits for Kyber-512)
+    u_compressed = [compress_poly(p, DU) for p in u_poly_vec]
+
+    # Polynomial v is compressed to DV bits (4 bits for Kyber-512)
+    v_compressed = compress_poly(v_poly, DV)
+
+    return u_compressed, v_compressed
 
 def decrypt(sk, ct):
-    u, v = ct
+    u_compressed, v_compressed = ct
     s = sk
-    mn = v - vec_dot(s, u)
+
+    # 1. DECOMPRESS ciphertext components
+    # We must decompress before doing arithmetic
+    u_decompressed = [decompress_poly(p, DU) for p in u_compressed]
+    v_decompressed = decompress_poly(v_compressed, DV)
+
+    # 2. Standard decryption logic
+    mn = v_decompressed - vec_dot(s, u_decompressed)
+
     return decode_message(mn)
 
 if __name__ == "__main__":
@@ -250,6 +303,8 @@ if __name__ == "__main__":
     print(f"Original message: {secret}")
     
     ct = encrypt(pk, secret)
+    print(f"Ciphertext compressed (v[0] example): {ct[1].coeffs[0]} (should be < {2 ** DV})")
+
     rec = decrypt(sk, ct)
     
     print(f"Recovered message: {rec}")
