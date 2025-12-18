@@ -1,4 +1,5 @@
-import random
+import secrets
+import hashlib  # Added for SHAKE-128 (needed for matrix expansion)
 from typing import List
 
 # ============================
@@ -166,13 +167,18 @@ class PolyObj:
         return PolyObj(res)
 
 # ============================
-# 5. HELPERS
+# 5. HELPERS (Using secrets)
 # ============================
+# Helper to get secure random bits
+def csprng_bits(k: int) -> int:
+    return secrets.randbits(k)
+
 def cbd(eta: int) -> PolyObj:
     coeffs = []
     for _ in range(N):
-        s1 = sum(random.getrandbits(1) for _ in range(eta))
-        s2 = sum(random.getrandbits(1) for _ in range(eta))
+        # Using csprng_bits instead of random
+        s1 = sum(csprng_bits(1) for _ in range(eta))
+        s2 = sum(csprng_bits(1) for _ in range(eta))
         coeffs.append(s1 - s2)
     return PolyObj(coeffs)
 
@@ -233,7 +239,69 @@ def decompress_poly(p: PolyObj, d: int) -> PolyObj:
     return PolyObj([decompress_int(c, d) for c in p.coeffs])
 
 # ============================
-# 6. MAIN & SANITY CHECK
+# 6. MATRIX GENERATION (PROPER A DISTRIBUTION)
+# ============================
+
+# Function to parse SHAKE-128 output bytes into coefficients
+# This implements Uniform Sampling modulo Q with Rejection Sampling
+def parse_rejection_sampling(stream_bytes: bytes, n: int = 256) -> List[int]:
+    """
+    Parses a byte stream into N coefficients modulo Q.
+    Uses the strategy where 3 bytes yield 2 12-bit integers.
+    """
+    coeffs = []
+    i = 0
+    # Process 3 bytes at a time
+    while len(coeffs) < n and i + 2 < len(stream_bytes):
+        b1 = stream_bytes[i]
+        b2 = stream_bytes[i+1]
+        b3 = stream_bytes[i+2]
+        i += 3
+
+        # d1 takes the first byte and the lower 4 bits of the second byte
+        d1 = b1 + (b2 & 0x0F) * 256
+        # d2 takes the upper 4 bits of the second byte and the third byte
+        d2 = (b2 >> 4) + b3 * 16
+
+        # Rejection sampling: if value >= Q, discard it
+        if d1 < Q:
+            coeffs.append(d1)
+        # Check if we still need coeffs before adding the second one
+        if len(coeffs) < n and d2 < Q:
+            coeffs.append(d2)
+            
+    # For educational purposes, if stream runs out (unlikely with sufficient buffer), 
+    # we pad with zeros, but in production, we would pull more bytes from XOF.
+    if len(coeffs) < n:
+        coeffs += [0] * (n - len(coeffs))
+        
+    return coeffs
+
+# Function to expand a 32-byte seed into the matrix A using SHAKE-128
+def gen_matrix_from_seed(rho: bytes) -> List[List[PolyObj]]:
+    """
+    Determistically generates Matrix A (KxK) from a seed 'rho'.
+    """
+    A = [[None for _ in range(K)] for _ in range(K)]
+    
+    for i in range(K):
+        for j in range(K):
+            # Input to XOF is seed || j || i (standard coordinate encoding)
+            input_bytes = rho + bytes([j, i])
+            
+            # Use SHAKE-128 (XOF) to generate a pseudo-random stream
+            shake = hashlib.shake_128()
+            shake.update(input_bytes)
+            # We request enough bytes to likely find 256 valid coefficients
+            stream = shake.digest(840) 
+            
+            # Convert bytes to polynomial coefficients
+            coeffs = parse_rejection_sampling(stream)
+            A[i][j] = PolyObj(coeffs)
+    return A
+
+# ============================
+# 7. KEYGEN, ENCRYPT, DECRYPT
 # ============================
 def sanity_check_ntt():
     print("--- RUNNING MATH SANITY CHECK ---")
@@ -249,18 +317,31 @@ def sanity_check_ntt():
     return True
 
 def keygen():
-    A = [[PolyObj([random.randint(0,Q-1) for _ in range(N)]) for _ in range(K)] for _ in range(K)]
+    # Generate a cryptographically secure random 32-byte seed 'rho'
+    rho = secrets.token_bytes(32)
+    
+    # Expand 'rho' into matrix A instead of generating A randomly
+    A = gen_matrix_from_seed(rho)
+    
     s = [cbd(ETA) for _ in range(K)]
     e = [cbd(ETA) for _ in range(K)]
     t = vec_add(mat_vec_mul(A, s), e)
-    return (A, t), s
+    
+    # Public Key now includes 'rho' so Bob can regenerate A
+    return (t, rho), s
 
 def encrypt(pk, m_int):
-    A, t = pk
+    # Unpack t and rho from Public Key
+    t, rho = pk
+    
+    # Regenerate Matrix A from the seed 'rho'
+    A = gen_matrix_from_seed(rho)
+    
     r = [cbd(ETA) for _ in range(K)]
     e1 = [cbd(ETA) for _ in range(K)]
     e2 = cbd(ETA)
 
+    # Transpose A for encryption (A_T)
     A_T = [[A[j][i] for j in range(K)] for i in range(K)]
 
     # 1. Calculate uncompressed u and v
@@ -299,10 +380,11 @@ if __name__ == "__main__":
     print("[keygen] Generating keys...")
     pk, sk = keygen()
     
-    secret = 5782
+    secret = 102892
     print(f"Original message: {secret}")
     
     ct = encrypt(pk, secret)
+    # Showing that we are using compression
     print(f"Ciphertext compressed (v[0] example): {ct[1].coeffs[0]} (should be < {2 ** DV})")
 
     rec = decrypt(sk, ct)
