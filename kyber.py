@@ -270,8 +270,7 @@ def parse_rejection_sampling(stream_bytes: bytes, n: int = 256) -> List[int]:
         if len(coeffs) < n and d2 < Q:
             coeffs.append(d2)
             
-    # For educational purposes, if stream runs out (unlikely with sufficient buffer), 
-    # we pad with zeros, but in production, we would pull more bytes from XOF.
+    
     if len(coeffs) < n:
         coeffs += [0] * (n - len(coeffs))
         
