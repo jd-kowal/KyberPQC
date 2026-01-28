@@ -8,7 +8,9 @@ from typing import List
 N = 256
 Q = 3329
 K = 2        # Kyber-512
-ETA = 2      # Noise parameter for Kyber-512
+
+ETA_1 = 3    # Noise parameter for KeyGen (ML-KEM-512)
+ETA_2 = 2    # Noise parameter for Encrypt (ML-KEM-512)
 
 # Compression parameters for Kyber-512 (according to FIPS 203)
 DU = 10      # Compression bits for vector u
@@ -167,19 +169,50 @@ class PolyObj:
         return PolyObj(res)
 
 # ============================
-# 5. HELPERS (Using secrets)
+# 5. HELPERS (Updated for FIPS 203 RNG)
 # ============================
-# Helper to get secure random bits
-def csprng_bits(k: int) -> int:
-    return secrets.randbits(k)
 
-def cbd(eta: int) -> PolyObj:
+# --- PRF oparta na SHAKE-256 ---
+def prf(seed: bytes, nonce: int, length: int) -> bytes:
+    """
+    Pseudo-Random Function based on SHAKE-256.
+    Used to expand seed into noise bytes for CBD.
+    Input: 32-byte seed + 1-byte nonce.
+    """
+    shake = hashlib.shake_256()
+    shake.update(seed + bytes([nonce]))
+    return shake.digest(length)
+
+
+
+def cbd(eta: int, coin_bytes: bytes) -> PolyObj:
+    """
+    Centered Binomial Distribution.
+    Deterministic: consumes input bytes instead of using random().
+    """
     coeffs = []
+    
+    # Convert bytes to bits for consumption
+    bits = []
+    for b in coin_bytes:
+        for i in range(8):
+            bits.append((b >> i) & 1)
+            
+    # Check if we have enough bits (2 * eta per coeff)
+    if len(bits) < 2 * eta * N:
+        raise ValueError("Not enough random bytes for CBD")
+
+    idx = 0
     for _ in range(N):
-        # Using csprng_bits instead of random
-        s1 = sum(csprng_bits(1) for _ in range(eta))
-        s2 = sum(csprng_bits(1) for _ in range(eta))
-        coeffs.append(s1 - s2)
+        # Sample eta bits for 'a'
+        a = sum(bits[idx + j] for j in range(eta))
+        idx += eta
+        # Sample eta bits for 'b'
+        b = sum(bits[idx + j] for j in range(eta))
+        idx += eta
+        
+        coeffs.append(a - b)
+        
     return PolyObj(coeffs)
 
 def vec_add(v1, v2): return [a + b for a, b in zip(v1, v2)]
@@ -316,14 +349,37 @@ def sanity_check_ntt():
     return True
 
 def keygen():
-    # Generate a cryptographically secure random 32-byte seed 'rho'
-    rho = secrets.token_bytes(32)
     
-    # Expand 'rho' into matrix A instead of generating A randomly
+    # 1. Random seed d (32 bytes)
+    d = secrets.token_bytes(32)
+    # 2. Random seed z (32 bytes)
+    z = secrets.token_bytes(32)
+    
+    # 3. Expand d using G (SHA3-512) -> (rho, sigma)
+    g_hash = hashlib.sha3_512()
+    g_hash.update(d) 
+    digest = g_hash.digest()
+    rho, sigma = digest[:32], digest[32:] # rho for A, sigma for s/e
+
+    # Expand 'rho' into matrix A
     A = gen_matrix_from_seed(rho)
     
-    s = [cbd(ETA) for _ in range(K)]
-    e = [cbd(ETA) for _ in range(K)]
+    # Generate s and e using PRF on sigma
+    # (Using FIPS 203 ETA_1 for KeyGen)
+    s = []
+    nonce = 0
+    for _ in range(K):
+        # Request enough bytes for 2*ETA*N bits
+        coin_bytes = prf(sigma, nonce, 64 * ETA_1) 
+        s.append(cbd(ETA_1, coin_bytes))
+        nonce += 1
+        
+    e = []
+    for _ in range(K):
+        coin_bytes = prf(sigma, nonce, 64 * ETA_1)
+        e.append(cbd(ETA_1, coin_bytes))
+        nonce += 1    
+    
     t = vec_add(mat_vec_mul(A, s), e)
     
     # Public Key now includes 'rho' so Bob can regenerate A
@@ -336,9 +392,26 @@ def encrypt(pk, m_int):
     # Regenerate Matrix A from the seed 'rho'
     A = gen_matrix_from_seed(rho)
     
-    r = [cbd(ETA) for _ in range(K)]
-    e1 = [cbd(ETA) for _ in range(K)]
-    e2 = cbd(ETA)
+    # Generate random coins (32 bytes)
+    coins = secrets.token_bytes(32)
+    
+    # Expand coins using PRF to generate r, e1, e2
+    # (Using FIPS 203 ETA_2 for Encrypt)
+    nonce = 0
+    r = []
+    for _ in range(K):
+        coin_bytes = prf(coins, nonce, 64 * ETA_1) # Kyber-512 uses Eta1 for r
+        r.append(cbd(ETA_1, coin_bytes))
+        nonce += 1
+        
+    e1 = []
+    for _ in range(K):
+        coin_bytes = prf(coins, nonce, 64 * ETA_2) # Kyber-512 uses Eta2 for e1
+        e1.append(cbd(ETA_2, coin_bytes))
+        nonce += 1
+        
+    coin_bytes = prf(coins, nonce, 64 * ETA_2) # Kyber-512 uses Eta2 for e2
+    e2 = cbd(ETA_2, coin_bytes)
 
     # Transpose A for encryption (A_T)
     A_T = [[A[j][i] for j in range(K)] for i in range(K)]
@@ -379,7 +452,7 @@ if __name__ == "__main__":
     print("[keygen] Generating keys...")
     pk, sk = keygen()
     
-    secret = 102892
+    secret = 1028
     print(f"Original message: {secret}")
     
     ct = encrypt(pk, secret)
