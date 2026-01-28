@@ -37,7 +37,7 @@ def start_persistent_server():
 
                     ciphertext = KyberNetworkUtils.from_bytes(data)
 
-                    # 4. Dekapsulacja (Matematyka)
+                    # 4. Dekapsulacja
                     recovered_int = KyberNetworkUtils.decapsulate(sk, ciphertext)
 
                     # 5. Zamiana liczby na tekst (Dla podglądu)
