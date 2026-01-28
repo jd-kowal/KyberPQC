@@ -147,13 +147,14 @@ def poly_mul_ntt(a_ntt: List[int], b_ntt: List[int]) -> List[int]:
 # 4. POLYNOMIAL OBJECT
 # ============================
 class PolyObj:
-    def __init__(self, coeffs: List[int] = None):
+    def __init__(self, coeffs: List[int] = None, is_ntt: bool = False):
         if coeffs is None:
             self.coeffs = [0] * N
         else:
             self.coeffs = [int(x) % Q for x in coeffs]
             if len(self.coeffs) < N:
                 self.coeffs += [0] * (N - len(self.coeffs))
+        self.is_ntt = is_ntt
 
     def __add__(self, other):
         return PolyObj([(a + b) % Q for a, b in zip(self.coeffs, other.coeffs)])
@@ -162,8 +163,10 @@ class PolyObj:
         return PolyObj([(a - b) % Q for a, b in zip(self.coeffs, other.coeffs)])
 
     def __mul__(self, other):
-        a_ntt = ntt(self.coeffs)
-        b_ntt = ntt(other.coeffs)
+        # Check if vectors are already in NTT domain (like Matrix A)
+        a_ntt = self.coeffs if self.is_ntt else ntt(self.coeffs)
+        b_ntt = other.coeffs if getattr(other, 'is_ntt', False) else ntt(other.coeffs)
+        
         c_ntt = poly_mul_ntt(a_ntt, b_ntt)
         res = inv_ntt(c_ntt)
         return PolyObj(res)
@@ -329,7 +332,8 @@ def gen_matrix_from_seed(rho: bytes) -> List[List[PolyObj]]:
             
             # Convert bytes to polynomial coefficients
             coeffs = parse_rejection_sampling(stream)
-            A[i][j] = PolyObj(coeffs)
+            # FIPS 203: Matrix A is sampled directly in NTT domain
+            A[i][j] = PolyObj(coeffs, is_ntt=True)
     return A
 
 # ============================
@@ -452,7 +456,7 @@ if __name__ == "__main__":
     print("[keygen] Generating keys...")
     pk, sk = keygen()
     
-    secret = 1028
+    secret = 1028123
     print(f"Original message: {secret}")
     
     ct = encrypt(pk, secret)
